@@ -60,6 +60,33 @@ fn frontmost_folder() -> Option<String> {
     frontmost_folder_impl()
 }
 
+/// Open a file path in the OS default application. Sidesteps the shell
+/// plugin's URL-only scope so result clicks in the main window just work.
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+
+    Command::new(cmd)
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{cmd} {path}: {e}"))
+}
+
+/// Send a query from the spotlight to the main window's search page.
+/// The main window is shown if hidden, focused, and the embedded UI
+/// navigates to /search/?q=… via a Tauri event.
+#[tauri::command]
+fn search_in_main(app: AppHandle, query: String) {
+    show_main_window(&app);
+    let _ = app.emit("nav:search", query);
+}
+
 // ---------- frontmost folder ----------
 
 #[cfg(target_os = "macos")]
@@ -383,6 +410,13 @@ pub fn run() {
     let trigger = shortcut.clone();
 
     tauri::Builder::default()
+        // Single-instance must be registered first: if another instance is
+        // already running, the callback fires in that one and the new
+        // process exits without ever spawning another sidecar.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Second launch — just bring our existing window forward.
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(
@@ -400,7 +434,9 @@ pub fn run() {
             show_main,
             hide_spotlight,
             resize_spotlight,
-            frontmost_folder
+            frontmost_folder,
+            open_path,
+            search_in_main
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

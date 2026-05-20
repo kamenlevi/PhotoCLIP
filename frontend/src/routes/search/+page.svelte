@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { page } from "$app/stores";
   import { api, type SearchResult } from "$lib/ipc";
   import ResultGrid from "$lib/components/ResultGrid.svelte";
 
@@ -6,6 +8,17 @@
   let results = $state<SearchResult[]>([]);
   let loading = $state(false);
   let err = $state<string | null>(null);
+
+  // Auto-run a search whenever ?q= changes (spotlight uses this).
+  let lastQ: string | null = null;
+  $effect(() => {
+    const q = $page.url.searchParams.get("q");
+    if (q !== null && q !== lastQ) {
+      lastQ = q;
+      query = q;
+      if (q.trim()) run();
+    }
+  });
 
   // Filters
   let folder = $state("");

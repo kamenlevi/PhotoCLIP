@@ -1,5 +1,7 @@
 <script lang="ts">
   import "../app.css";
+  import { onDestroy, onMount } from "svelte";
+  import { goto } from "$app/navigation";
   import { page } from "$app/stores";
 
   const tabs = [
@@ -9,6 +11,31 @@
   ];
 
   let { children } = $props();
+  let unlistenSearch: (() => void) | null = null;
+  let unlistenNav: (() => void) | null = null;
+
+  onMount(async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      // Spotlight → main: navigate to /search and run the query.
+      unlistenSearch = await listen("nav:search", (e) => {
+        const q = String(e.payload ?? "");
+        const url = `/search/?q=${encodeURIComponent(q)}`;
+        goto(url);
+      });
+      // Tray menu → switch tabs.
+      unlistenNav = await listen("nav", (e) => {
+        const tab = String(e.payload ?? "");
+        if (tab === "library") goto("/library/");
+        else if (tab === "settings") goto("/settings/");
+        else if (tab === "search") goto("/search/");
+      });
+    } catch { /* dev browser, no tauri */ }
+  });
+  onDestroy(() => {
+    unlistenSearch?.();
+    unlistenNav?.();
+  });
 </script>
 
 <div class="flex h-full flex-col">
