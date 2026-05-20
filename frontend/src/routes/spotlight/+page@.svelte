@@ -76,9 +76,17 @@
 </div>
 
 <style>
-  .spotlight {
+  :global(html), :global(body) {
     height: 100%;
     width: 100%;
+    margin: 0;
+    padding: 0;
+    background: transparent !important;
+    overflow: hidden;
+  }
+  .spotlight {
+    height: 100vh;
+    width: 100vw;
     background: rgba(28, 28, 32, 0.93);
     border-radius: 16px;
     box-shadow:
@@ -89,11 +97,14 @@
     display: flex;
     align-items: center;
     padding: 0 22px;
+    box-sizing: border-box;
     -webkit-font-smoothing: antialiased;
     font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
   }
   input {
     flex: 1;
+    width: 100%;
+    height: 100%;
     background: transparent;
     border: none;
     color: inherit;
