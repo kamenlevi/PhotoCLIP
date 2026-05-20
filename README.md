@@ -52,7 +52,54 @@ pnpm install
 pnpm tauri dev
 ```
 
-The Rust shell launches the Python sidecar, reads the chosen port from stdout, and points the SvelteKit UI at it.
+The Rust shell launches the Python sidecar, reads the chosen port from
+stdout, and points the SvelteKit UI at it.
+
+### What you get
+
+- A **tray icon** lives in the system menu bar / status area. The app
+  stays alive in the background even if you close the main window —
+  click the tray icon for a menu (Quick search…, Library…, Settings…,
+  Quit).
+- A **global hotkey** opens a floating Spotlight-style search panel:
+  - macOS: **Cmd+Space** (free it from system Spotlight in System
+    Settings → Keyboard → Shortcuts → Spotlight)
+  - Linux / Windows: **Ctrl+Space**
+- The spotlight panel **scopes to the front-most file-manager window**
+  if one is open (Finder on macOS, Nautilus / Nemo / Dolphin / Thunar /
+  Caja / PCManFM on Linux). Otherwise it searches every indexed folder.
+- Type → live results (debounced, top-30). **Arrow keys** to move,
+  **Enter** to open in the OS default viewer, **Esc** or click-away to
+  dismiss.
+
+### Linux system dependencies
+
+For the desktop build on Ubuntu / Debian:
+
+```bash
+sudo apt install -y \
+  libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev \
+  xdotool                # for frontmost-folder detection on X11
+```
+
+Frontmost-folder detection works on **X11** out of the box. On
+**Wayland** the app degrades gracefully — tray, spotlight, and global
+hotkey all still work, but the panel won't auto-scope to a folder.
+
+### Building a redistributable bundle
+
+```bash
+cd frontend
+pnpm tauri build
+# Linux:  src-tauri/target/release/bundle/{deb,appimage}/...
+# macOS:  src-tauri/target/release/bundle/{dmg,macos}/...
+```
+
+Run that on the platform you want to ship for. The resulting .deb /
+.AppImage / .dmg installs as a normal desktop app — tray icon, hotkey,
+and all.
 
 ## Models
 
