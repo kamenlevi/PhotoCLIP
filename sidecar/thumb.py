@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -34,15 +35,43 @@ def is_supported(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_EXTS
 
 
+def _load_raw(path: Path) -> Image.Image:
+    """Load a RAW file as RGB. Prefers the embedded JPEG preview over a
+    full demosaic — CLIP only ever sees a 224x224 tensor, so demosaicing
+    the full sensor is ~30x wasted work. Cameras embed a preview at
+    something like 1920x1280 which is plenty for CLIP."""
+    if rawpy is None:
+        raise RuntimeError(f"rawpy not installed; cannot read {path}")
+    with rawpy.imread(str(path)) as raw:
+        try:
+            thumb_data = raw.extract_thumb()
+            fmt = getattr(thumb_data, "format", None)
+            jpeg_fmt = getattr(rawpy.ThumbFormat, "JPEG", None)
+            bitmap_fmt = getattr(rawpy.ThumbFormat, "BITMAP", None)
+            if fmt is not None and fmt == jpeg_fmt:
+                img = Image.open(io.BytesIO(thumb_data.data))
+                img = ImageOps.exif_transpose(img)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                return img
+            if fmt is not None and fmt == bitmap_fmt:
+                img = Image.fromarray(thumb_data.data)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                return img
+        except Exception:
+            pass
+        # No preview (or rawpy can't extract it). Fall back to half-size
+        # demosaic — still 4x faster than full, with identical CLIP input.
+        rgb = raw.postprocess(use_camera_wb=True, output_bps=8, half_size=True)
+    return Image.fromarray(rgb)
+
+
 def load_image(path: Path) -> Image.Image:
     """Return an RGB PIL image regardless of source format."""
     ext = path.suffix.lower()
     if ext in RAW_EXTS:
-        if rawpy is None:
-            raise RuntimeError(f"rawpy not installed; cannot read {path}")
-        with rawpy.imread(str(path)) as raw:
-            rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
-        return Image.fromarray(rgb)
+        return _load_raw(path)
     img = Image.open(path)
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
