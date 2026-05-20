@@ -58,6 +58,27 @@
     }
   }
 
+  async function toggleWatch(path: string, current: number) {
+    try {
+      await api.setWatch(path, !current);
+      await refresh();
+    } catch (e) {
+      err = (e as Error).message;
+    }
+  }
+
+  async function prune(path: string) {
+    try {
+      const r = await api.indexPrune(path);
+      await refresh();
+      msg = `Pruned ${r.pruned} dead row${r.pruned === 1 ? "" : "s"}.`;
+    } catch (e) {
+      err = (e as Error).message;
+    }
+  }
+
+  let msg = $state<string | null>(null);
+
   onMount(() => {
     refresh();
     pollTimer = setInterval(refresh, 1000);
@@ -68,7 +89,7 @@
 
   function pct(p: IndexProgress): number {
     if (!p.total) return 0;
-    return Math.round((100 * (p.indexed + p.skipped + p.failed)) / p.total);
+    return Math.round((100 * (p.indexed + p.moved + p.skipped + p.failed)) / p.total);
   }
 </script>
 
@@ -92,6 +113,9 @@
   {#if err}
     <div class="rounded border border-red-900/60 bg-red-950/40 p-2 text-sm text-red-300">{err}</div>
   {/if}
+  {#if msg}
+    <div class="rounded border border-emerald-900/60 bg-emerald-950/40 p-2 text-sm text-emerald-300">{msg}</div>
+  {/if}
 
   {#if folders.length === 0}
     <p class="text-sm text-neutral-500">No folders yet. Add one to start indexing.</p>
@@ -106,8 +130,19 @@
             <div class="truncate font-mono text-sm">{f.path}</div>
             <div class="text-xs text-neutral-500">{f.image_count} indexed images</div>
           </div>
+          <label class="flex items-center gap-1.5 text-xs text-neutral-300">
+            <input
+              type="checkbox"
+              checked={!!f.watch}
+              on:change={() => toggleWatch(f.path, f.watch)}
+              class="h-3.5 w-3.5 accent-indigo-500" />
+            Watch
+          </label>
           <button on:click={() => reindex(f.path)} class="rounded bg-neutral-800 px-2 py-1 text-xs hover:bg-neutral-700">
             Re-index
+          </button>
+          <button on:click={() => prune(f.path)} class="rounded bg-neutral-800 px-2 py-1 text-xs hover:bg-neutral-700">
+            Prune
           </button>
           <button on:click={() => remove(f.path)} class="rounded bg-neutral-800 px-2 py-1 text-xs text-red-300 hover:bg-red-900/30">
             Remove
@@ -119,7 +154,9 @@
               <div class="h-full bg-indigo-500 transition-[width]" style="width: {pct(p)}%"></div>
             </div>
             <div class="mt-1 flex justify-between text-[11px] text-neutral-500">
-              <span>{p.indexed} indexed · {p.skipped} skipped · {p.failed} failed</span>
+              <span>
+                {p.indexed} indexed · {p.moved} moved · {p.skipped} skipped · {p.failed} failed
+              </span>
               <span>{p.seen}/{p.total}</span>
             </div>
             {#if p.current_path}

@@ -41,3 +41,9 @@ def model_cache_dir() -> Path:
     p = app_data_dir() / "models"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def port_file() -> Path:
+    """Path used by the server to publish its chosen port and by the CLI
+    to discover a running server."""
+    return app_data_dir() / "server.port"

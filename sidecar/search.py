@@ -144,6 +144,33 @@ def similar_to(image_id: int, **kwargs) -> list[SearchResult]:
     return search_by_vector(conn, floats, **kwargs)
 
 
+def _try_resident_server(query: str, **kwargs) -> list[SearchResult] | None:
+    """If a sidecar server is running (announced via port file), use it.
+    Avoids the 3-5s torch cold start on every CLI call. Returns None on
+    any failure so the caller can fall back to in-process search."""
+    from .paths import port_file
+    pf = port_file()
+    if not pf.exists():
+        return None
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+        port = int(pf.read_text().strip())
+        payload = {"query": query, **{k: v for k, v in kwargs.items() if v is not None}}
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/search",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        return [SearchResult(**row) for row in data.get("results", [])]
+    except (OSError, urllib.error.URLError, ValueError):
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Search indexed photos by text query.")
     p.add_argument("query", help="Natural language query.")
@@ -153,17 +180,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from", dest="date_from", default=None)
     p.add_argument("--to", dest="date_to", default=None)
     p.add_argument("--has-gps", action="store_true", default=None)
+    p.add_argument(
+        "--no-server", action="store_true",
+        help="Skip the resident server and load the model in-process.",
+    )
     args = p.parse_args(argv)
 
-    results = search_text(
-        args.query,
-        top_k=args.top_k,
-        folder=args.folder,
-        camera=args.camera,
-        date_from=args.date_from,
-        date_to=args.date_to,
-        has_gps=args.has_gps,
+    kwargs = dict(
+        top_k=args.top_k, folder=args.folder, camera=args.camera,
+        date_from=args.date_from, date_to=args.date_to, has_gps=args.has_gps,
     )
+    results: list[SearchResult] | None = None
+    if not args.no_server:
+        results = _try_resident_server(args.query, **kwargs)
+    if results is None:
+        results = search_text(args.query, **kwargs)
     if not results:
         print("(no results)")
         return 0

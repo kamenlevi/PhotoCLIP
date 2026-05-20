@@ -3,10 +3,15 @@ as the first line, so the Tauri shell can read it.
 
     PHOTOCLIP_PORT=12345  (line on stdout, then a JSON line with details)
     {"port": 12345, "pid": 4242, "data_dir": "/.../photoclip"}
+
+The same port is also written to <data-dir>/server.port so the standalone CLI
+(`python -m sidecar.search ...`) can reuse the resident model and skip the
+~3-5s torch cold start.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import socket
@@ -16,21 +21,21 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from . import clip_model, db
 from .index import IndexProgress, index_folder
-from .paths import app_data_dir, db_path
+from .paths import app_data_dir, db_path, port_file
+from .prune import prune_all, prune_folder
 from .search import search_by_vector, search_text, similar_to
+from .watcher import manager as watcher_manager
 
 
 app = FastAPI(title="PhotoCLIP sidecar", version="0.1.0")
 
-# Tauri serves the UI from a custom scheme in production and from
-# http://localhost:1420 in dev; allow any localhost origin.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|tauri://localhost)$",
@@ -43,7 +48,7 @@ app.add_middleware(
 # ---------- shared state ----------
 
 _progress_lock = threading.Lock()
-_progress: dict[str, IndexProgress] = {}  # keyed by folder path
+_progress: dict[str, IndexProgress] = {}
 _index_thread: threading.Thread | None = None
 
 
@@ -52,15 +57,15 @@ def _set_progress(folder: str, p: IndexProgress) -> None:
         _progress[folder] = p
 
 
-def _get_progress(folder: str) -> IndexProgress | None:
-    with _progress_lock:
-        return _progress.get(folder)
-
-
 # ---------- models ----------
 
 class FolderIn(BaseModel):
     path: str
+
+
+class WatchIn(BaseModel):
+    path: str
+    watch: bool
 
 
 class SearchIn(BaseModel):
@@ -95,7 +100,6 @@ def healthz() -> dict[str, Any]:
 @app.get("/library/folders")
 def list_folders() -> list[dict[str, Any]]:
     conn = db.connect()
-    # init_db requires a dim — only initialize if we know one.
     dim = db.get_setting(conn, "embedding_dim")
     if dim:
         db.init_db(conn, int(dim))
@@ -116,7 +120,7 @@ def add_folder(body: FolderIn) -> dict[str, Any]:
     if not root.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
     conn = db.connect()
-    bundle = clip_model.get_model()  # ensures dim is known
+    bundle = clip_model.get_model()
     db.init_db(conn, bundle.dim)
     conn.execute(
         "INSERT INTO folders(path, added_at) VALUES(?, ?) ON CONFLICT(path) DO NOTHING",
@@ -132,16 +136,34 @@ def remove_folder(path: str) -> dict[str, Any]:
     row = conn.execute("SELECT id FROM folders WHERE path = ?", (path,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Folder not tracked")
-    # Vec rows are not cascaded; clean up explicitly.
+    folder_id = row["id"]
+    # Stop a watcher if one is running for this folder.
+    watcher_manager().stop(folder_id)
     image_ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM images WHERE folder_id = ?", (row["id"],)
+        "SELECT id FROM images WHERE folder_id = ?", (folder_id,)
     )]
     if image_ids:
         qs = ",".join("?" * len(image_ids))
         conn.execute(f"DELETE FROM image_vecs WHERE id IN ({qs})", image_ids)
-    conn.execute("DELETE FROM folders WHERE id = ?", (row["id"],))
+    conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
     conn.commit()
     return {"ok": True}
+
+
+@app.post("/library/folders/watch")
+def set_folder_watch(body: WatchIn) -> dict[str, Any]:
+    conn = db.connect()
+    row = conn.execute("SELECT id, path FROM folders WHERE path = ?", (body.path,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Folder not tracked")
+    folder_id = row["id"]
+    conn.execute("UPDATE folders SET watch = ? WHERE id = ?", (1 if body.watch else 0, folder_id))
+    conn.commit()
+    if body.watch:
+        watcher_manager().start(folder_id, Path(row["path"]))
+    else:
+        watcher_manager().stop(folder_id)
+    return {"ok": True, "watch": body.watch}
 
 
 @app.post("/index/start")
@@ -176,6 +198,19 @@ def index_status(folder: str | None = None) -> dict[str, Any]:
             p = _progress.get(folder)
             return p.snapshot() if p else {"done": True, "total": 0}
         return {k: v.snapshot() for k, v in _progress.items()}
+
+
+@app.post("/index/prune")
+def index_prune(folder: str | None = None) -> dict[str, Any]:
+    if folder:
+        conn = db.connect()
+        row = conn.execute("SELECT id FROM folders WHERE path = ?", (folder,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Folder not tracked")
+        n = prune_folder(row["id"])
+    else:
+        n = prune_all()
+    return {"ok": True, "pruned": n}
 
 
 @app.post("/search")
@@ -214,12 +249,24 @@ def photo_similar(photo_id: int, k: int = Query(20, ge=1, le=200)) -> dict[str, 
 
 
 @app.get("/photo/{photo_id}/file")
-def photo_file(photo_id: int):
+def photo_file(photo_id: int, request: Request):
     conn = db.connect()
-    row = conn.execute("SELECT path FROM images WHERE id = ?", (photo_id,)).fetchone()
+    row = conn.execute(
+        "SELECT path, mtime FROM images WHERE id = ?", (photo_id,)
+    ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(row["path"])
+    etag = f'"img-{photo_id}-{int(row["mtime"])}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return FileResponse(
+        row["path"],
+        headers={
+            "ETag": etag,
+            # Originals are cached for a day, then revalidated via ETag.
+            "Cache-Control": "private, max-age=86400, must-revalidate",
+        },
+    )
 
 
 @app.get("/photo/{photo_id}/thumb")
@@ -231,7 +278,13 @@ def photo_thumb(photo_id: int):
     p = Path(row["thumb_path"])
     if not p.exists():
         raise HTTPException(status_code=404, detail="Thumb missing")
-    return FileResponse(p, media_type="image/jpeg")
+    # Thumb filenames are SHA1-of-path, so the bytes are immutable for a
+    # given URL; cache forever.
+    return FileResponse(
+        p,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/settings")
@@ -259,6 +312,29 @@ def set_settings(body: SettingsIn) -> dict[str, Any]:
     return get_settings()
 
 
+# ---------- lifecycle ----------
+
+def _start_persistent_watchers() -> None:
+    """Boot watchers for any folder whose `watch` flag is set."""
+    conn = db.connect()
+    rows = conn.execute("SELECT id, path FROM folders WHERE watch = 1").fetchall()
+    for r in rows:
+        try:
+            watcher_manager().start(r["id"], Path(r["path"]))
+        except Exception as e:
+            print(f"[server] failed to start watcher for {r['path']}: {e}", flush=True)
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _start_persistent_watchers()
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    watcher_manager().stop_all()
+
+
 # ---------- bootstrap ----------
 
 def _pick_port() -> int:
@@ -270,15 +346,29 @@ def _pick_port() -> int:
         return s.getsockname()[1]
 
 
+def _write_port_file(port: int) -> None:
+    pf = port_file()
+    pf.write_text(str(port))
+
+    def _cleanup() -> None:
+        try:
+            if pf.exists() and pf.read_text().strip() == str(port):
+                pf.unlink()
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
+
+
 def main() -> int:
     port = _pick_port()
-    # First line: a parseable port. Second line: structured info. Both stdout, flushed.
     print(f"PHOTOCLIP_PORT={port}", flush=True)
     print(json.dumps({
         "port": port,
         "pid": os.getpid(),
         "data_dir": str(app_data_dir()),
     }), flush=True)
+    _write_port_file(port)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
     return 0
 

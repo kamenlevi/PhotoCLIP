@@ -85,8 +85,10 @@ export interface IndexProgress {
   total: number;
   seen: number;
   indexed: number;
+  moved: number;
   skipped: number;
   failed: number;
+  pruned: number;
   current_path: string | null;
   done: boolean;
   started_at: number;
@@ -136,6 +138,16 @@ export const api = {
     req<IndexProgress | Record<string, IndexProgress>>(
       folder ? `/index/status?folder=${encodeURIComponent(folder)}` : "/index/status"
     ),
+  indexPrune: (folder?: string) =>
+    req<{ ok: boolean; pruned: number }>(
+      folder ? `/index/prune?folder=${encodeURIComponent(folder)}` : "/index/prune",
+      { method: "POST" }
+    ),
+  setWatch: (path: string, watch: boolean) =>
+    req<{ ok: boolean; watch: boolean }>("/library/folders/watch", {
+      method: "POST",
+      body: JSON.stringify({ path, watch }),
+    }),
 
   search: (opts: SearchOptions) =>
     req<{ results: SearchResult[] }>("/search", {
