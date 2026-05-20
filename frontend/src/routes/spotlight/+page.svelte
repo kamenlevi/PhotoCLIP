@@ -1,14 +1,11 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onMount } from "svelte";
 
   type InvokeFn = <T = unknown>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
-  type ListenFn = (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
   let invoke: InvokeFn | null = null;
-  let listen: ListenFn | null = null;
 
   let query = $state("");
   let inputEl: HTMLInputElement | null = $state(null);
-  let unlistenShow: (() => void) | null = null;
 
   async function close() {
     if (!invoke) return;
@@ -27,6 +24,14 @@
     await close();
   }
 
+  function resetInput() {
+    query = "";
+    if (inputEl) {
+      inputEl.value = "";
+      inputEl.focus();
+    }
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -37,38 +42,23 @@
     }
   }
 
+  // The browser focus event fires reliably every time the Tauri window
+  // is shown, even after the webview has been suspended in the background.
+  function onWindowFocus() {
+    resetInput();
+  }
+
   onMount(async () => {
     try {
       const core = await import("@tauri-apps/api/core");
       invoke = core.invoke as unknown as InvokeFn;
-      const ev = await import("@tauri-apps/api/event");
-      listen = ev.listen as unknown as ListenFn;
     } catch { /* dev browser fallback */ }
 
-    if (listen) {
-      unlistenShow = await listen("spotlight://show", async () => {
-        query = "";
-        await tick();
-        if (inputEl) {
-          inputEl.value = "";
-          inputEl.focus();
-        }
-      });
-    }
-
-    await tick();
-    if (inputEl) {
-      inputEl.value = "";
-      inputEl.focus();
-    }
-  });
-
-  onDestroy(() => {
-    if (unlistenShow) unlistenShow();
+    resetInput();
   });
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<svelte:window on:keydown={onKeydown} on:focus={onWindowFocus} />
 
 <div class="spotlight">
   <input

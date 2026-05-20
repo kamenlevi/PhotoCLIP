@@ -301,15 +301,6 @@ fn toggle_spotlight(app: &AppHandle) {
         let _ = position_spotlight(&win);
         let _ = win.show();
         let _ = win.set_focus();
-        let _ = win.emit("spotlight://show", ());
-        // Give the webview time to become active, then clear + focus.
-        // Dispatching an InputEvent syncs Svelte's reactive binding.
-        let _ = win.eval(
-            "setTimeout(()=>{const i=document.querySelector('.spotlight input');\
-             if(i){i.value='';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();}},50);\
-             setTimeout(()=>{const i=document.querySelector('.spotlight input');\
-             if(i){i.value='';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();}},150);",
-        );
     }
 }
 
