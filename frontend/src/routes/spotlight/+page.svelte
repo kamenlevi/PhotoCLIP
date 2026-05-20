@@ -49,13 +49,18 @@
       unlistenShow = await listen("spotlight://show", async () => {
         query = "";
         await tick();
-        inputEl?.focus();
-        inputEl?.select();
+        if (inputEl) {
+          inputEl.value = "";
+          inputEl.focus();
+        }
       });
     }
 
     await tick();
-    inputEl?.focus();
+    if (inputEl) {
+      inputEl.value = "";
+      inputEl.focus();
+    }
   });
 
   onDestroy(() => {
@@ -96,7 +101,7 @@
     height: 100vh;
     width: 100vw;
     background: rgba(28, 28, 32, 0.93);
-    border-radius: 16px;
+    border-radius: 12px;
     box-shadow:
       0 30px 80px rgba(0, 0, 0, 0.55),
       0 0 0 0.5px rgba(255, 255, 255, 0.10) inset;

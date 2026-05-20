@@ -250,7 +250,7 @@ fn kill_sidecar() {
 fn create_spotlight(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, "spotlight", WebviewUrl::App("spotlight/".into()))
         .title("PhotoCLIP")
-        .inner_size(680.0, 58.0)
+        .inner_size(680.0, 66.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -298,10 +298,17 @@ fn toggle_spotlight(app: &AppHandle) {
     if visible {
         let _ = win.hide();
     } else {
-        let _ = win.emit("spotlight://show", ());
         let _ = position_spotlight(&win);
         let _ = win.show();
         let _ = win.set_focus();
+        // Emit after show+focus so the webview is active and can process it.
+        let _ = win.emit("spotlight://show", ());
+        // Belt-and-suspenders: directly clear the input and focus it via JS
+        // in case the Svelte event listener missed the emit.
+        let _ = win.eval(
+            "document.querySelector('.spotlight input')?.focus();\
+             document.querySelector('.spotlight input')&&(document.querySelector('.spotlight input').value='');",
+        );
     }
 }
 
