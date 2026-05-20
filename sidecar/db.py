@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS images (
     lon REAL,
     phash TEXT,
     thumb_path TEXT,
+    ocr_text TEXT,
     indexed_at REAL NOT NULL
 );
 
@@ -44,6 +45,28 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"""
+
+
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS image_fts USING fts5(
+    ocr_text,
+    content='images',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS images_ai AFTER INSERT ON images BEGIN
+    INSERT INTO image_fts(rowid, ocr_text) VALUES (new.id, COALESCE(new.ocr_text, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS images_ad AFTER DELETE ON images BEGIN
+    INSERT INTO image_fts(image_fts, rowid, ocr_text) VALUES('delete', old.id, COALESCE(old.ocr_text, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS images_au AFTER UPDATE ON images BEGIN
+    INSERT INTO image_fts(image_fts, rowid, ocr_text) VALUES('delete', old.id, COALESCE(old.ocr_text, ''));
+    INSERT INTO image_fts(rowid, ocr_text) VALUES (new.id, COALESCE(new.ocr_text, ''));
+END;
 """
 
 
@@ -70,9 +93,24 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def migrate_ocr(conn: sqlite3.Connection) -> None:
+    """Add ocr_text column if missing (for databases created before OCR support)
+    and ensure the FTS5 table and triggers exist."""
+    # Check whether ocr_text column exists.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(images)").fetchall()}
+    if "ocr_text" not in cols:
+        conn.execute("ALTER TABLE images ADD COLUMN ocr_text TEXT")
+        conn.commit()
+    # Create FTS virtual table and triggers (IF NOT EXISTS / IF NOT EXISTS
+    # in trigger DDL keeps this idempotent).
+    conn.executescript(FTS_SCHEMA)
+    conn.commit()
+
+
 def init_db(conn: sqlite3.Connection, embedding_dim: int) -> None:
     conn.executescript(SCHEMA)
     conn.execute(_vec_table_sql(embedding_dim))
+    migrate_ocr(conn)
     conn.commit()
 
 

@@ -27,7 +27,7 @@ from typing import Callable, Iterable
 import imagehash
 from PIL import Image
 
-from . import clip_model, db, exif, thumb
+from . import clip_model, db, exif, ocr, thumb
 
 
 def _batch_size() -> int:
@@ -138,6 +138,7 @@ def _process_batch(
     for (folder_id, path, img, ph), feat in zip(items, feats):
         ex = exif.read_exif(path)
         thumb_p = thumb.make_thumb(path, img)
+        ocr_text = ocr.extract_text(img)
         mtime = path.stat().st_mtime
         existing = _existing(conn, str(path))
 
@@ -145,22 +146,25 @@ def _process_batch(
             image_id = existing["id"]
             conn.execute(
                 """UPDATE images SET folder_id=?, mtime=?, w=?, h=?, taken_at=?,
-                   camera=?, lat=?, lon=?, phash=?, thumb_path=?, indexed_at=?
+                   camera=?, lat=?, lon=?, phash=?, thumb_path=?, ocr_text=?,
+                   indexed_at=?
                    WHERE id=?""",
                 (
                     folder_id, mtime, img.width, img.height, ex.taken_at,
-                    ex.camera, ex.lat, ex.lon, ph, str(thumb_p), now, image_id,
+                    ex.camera, ex.lat, ex.lon, ph, str(thumb_p), ocr_text or None,
+                    now, image_id,
                 ),
             )
             conn.execute("DELETE FROM image_vecs WHERE id = ?", (image_id,))
         else:
             cur = conn.execute(
                 """INSERT INTO images(path, folder_id, mtime, w, h, taken_at,
-                   camera, lat, lon, phash, thumb_path, indexed_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   camera, lat, lon, phash, thumb_path, ocr_text, indexed_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     str(path), folder_id, mtime, img.width, img.height, ex.taken_at,
-                    ex.camera, ex.lat, ex.lon, ph, str(thumb_p), now,
+                    ex.camera, ex.lat, ex.lon, ph, str(thumb_p), ocr_text or None,
+                    now,
                 ),
             )
             image_id = cur.lastrowid
@@ -185,14 +189,16 @@ def _handle_move(
     """Repoint an existing row to a new path. Embedding stays untouched."""
     ex = exif.read_exif(path)
     thumb_p = thumb.make_thumb(path, img)
+    ocr_text = ocr.extract_text(img)
     mtime = path.stat().st_mtime
     conn.execute(
         """UPDATE images SET path=?, folder_id=?, mtime=?, w=?, h=?, taken_at=?,
-           camera=?, lat=?, lon=?, phash=?, thumb_path=?, indexed_at=?
+           camera=?, lat=?, lon=?, phash=?, thumb_path=?, ocr_text=?, indexed_at=?
            WHERE id=?""",
         (
             str(path), folder_id, mtime, img.width, img.height, ex.taken_at,
-            ex.camera, ex.lat, ex.lon, ph, str(thumb_p), time.time(), move_id,
+            ex.camera, ex.lat, ex.lon, ph, str(thumb_p), ocr_text or None,
+            time.time(), move_id,
         ),
     )
     conn.commit()

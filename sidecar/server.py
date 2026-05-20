@@ -242,6 +242,17 @@ def photo_detail(photo_id: int) -> dict[str, Any]:
     return dict(row)
 
 
+@app.get("/photo/{photo_id}/ocr")
+def photo_ocr(photo_id: int) -> dict[str, Any]:
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT ocr_text FROM images WHERE id = ?", (photo_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"id": photo_id, "ocr_text": row["ocr_text"] or ""}
+
+
 @app.get("/photo/{photo_id}/similar")
 def photo_similar(photo_id: int, k: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
     results = similar_to(photo_id, top_k=k)

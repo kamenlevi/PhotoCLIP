@@ -12,6 +12,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from . import clip_model, db
 
 
@@ -118,13 +120,103 @@ def search_by_vector(
     return out
 
 
+def search_fts(conn: sqlite3.Connection, query: str, top_k: int = 100) -> dict[int, float]:
+    """Return {image_id: normalized_bm25_score} for images whose OCR text matches."""
+    # Sanitise query for FTS5: wrap each token in quotes to avoid syntax errors
+    # from special characters.
+    tokens = query.strip().split()
+    if not tokens:
+        return {}
+    fts_query = " ".join(f'"{t}"' for t in tokens)
+    try:
+        rows = conn.execute(
+            "SELECT rowid, rank FROM image_fts WHERE image_fts MATCH ? ORDER BY rank LIMIT ?",
+            (fts_query, top_k),
+        ).fetchall()
+    except Exception:
+        # FTS table may not exist yet or query may be invalid
+        return {}
+    if not rows:
+        return {}
+    # rank is negative in FTS5 (more negative = better match). Normalise to 0-1.
+    raw = {r[0]: float(r[1]) for r in rows}
+    worst = min(raw.values())  # most negative
+    best = max(raw.values())   # least negative (closest to 0)
+    span = best - worst if best != worst else 1.0
+    return {rid: 1.0 - (score - worst) / span for rid, score in raw.items()}
+
+
+def _encode_query_reranked(bundle, query: str) -> list[float]:
+    """Encode multiple phrasings of the query and average the vectors for reranking."""
+    variants = [
+        query,
+        "a photo of " + query,
+        "an image showing " + query,
+    ]
+    vecs = [clip_model.encode_text(bundle, v) for v in variants]
+    avg = np.mean(vecs, axis=0)
+    # Re-normalise to unit length
+    norm = np.linalg.norm(avg)
+    if norm > 0:
+        avg = avg / norm
+    return avg.tolist()
+
+
 def search_text(query: str, **kwargs) -> list[SearchResult]:
     conn = db.connect()
     name, pretrained = _model_settings(conn)
     bundle = clip_model.get_model(name, pretrained)
     db.init_db(conn, bundle.dim)
-    vec = clip_model.encode_text(bundle, query).tolist()
-    return search_by_vector(conn, vec, **kwargs)
+
+    # Reranking: encode averaged query variants
+    vec = _encode_query_reranked(bundle, query)
+
+    top_k = kwargs.get("top_k", 50)
+
+    # Step 1: CLIP vector search (fetch more to leave room for merging)
+    clip_kwargs = dict(kwargs)
+    clip_kwargs["top_k"] = min(top_k * 2, 500)
+    clip_results = search_by_vector(conn, vec, **clip_kwargs)
+
+    # Step 2: FTS text search
+    fts_scores = search_fts(conn, query, top_k=top_k * 2)
+
+    if not fts_scores:
+        # No text matches — just return CLIP results trimmed to top_k
+        return clip_results[:top_k]
+
+    # Step 3: Hybrid merge
+    CLIP_WEIGHT = 0.7
+    TEXT_WEIGHT = 0.3
+
+    # Build lookup of CLIP results by id
+    result_map: dict[int, SearchResult] = {}
+    for r in clip_results:
+        hybrid = CLIP_WEIGHT * r.score + TEXT_WEIGHT * fts_scores.get(r.id, 0.0)
+        r.score = hybrid
+        result_map[r.id] = r
+
+    # Add FTS-only results (not in CLIP top results) with a base CLIP score
+    for image_id, text_score in fts_scores.items():
+        if image_id not in result_map:
+            row = conn.execute(
+                """SELECT id, path, thumb_path, w, h, taken_at, camera, lat, lon
+                     FROM images WHERE id = ?""",
+                (image_id,),
+            ).fetchone()
+            if row:
+                base_clip = 0.1  # low base score for FTS-only results
+                hybrid = CLIP_WEIGHT * base_clip + TEXT_WEIGHT * text_score
+                result_map[image_id] = SearchResult(
+                    id=row["id"], score=hybrid, path=row["path"],
+                    thumb_path=row["thumb_path"], w=row["w"], h=row["h"],
+                    taken_at=row["taken_at"], camera=row["camera"],
+                    lat=row["lat"], lon=row["lon"],
+                )
+
+    # Step 4: Re-sort by final score and return top_k
+    merged = sorted(result_map.values(), key=lambda r: r.score, reverse=True)
+    return merged[:top_k]
 
 
 def similar_to(image_id: int, **kwargs) -> list[SearchResult]:
