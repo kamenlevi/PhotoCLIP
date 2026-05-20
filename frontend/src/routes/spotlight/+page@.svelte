@@ -84,6 +84,14 @@
     background: transparent !important;
     overflow: hidden;
   }
+  /* Force-hide the root layout header/nav inside the spotlight window.
+     Each Tauri window has its own webview, so this cannot affect main. */
+  :global(header) { display: none !important; }
+  :global(.flex.h-full.flex-col > main) {
+    overflow: hidden !important;
+    height: 100% !important;
+    flex: none !important;
+  }
   .spotlight {
     height: 100vh;
     width: 100vw;
