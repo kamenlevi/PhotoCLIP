@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { api, type Settings } from "$lib/ipc";
+  import { sidecarReady } from "$lib/sidecar";
 
   let settings = $state<Settings | null>(null);
   let saving = $state(false);
+  let connecting = $state(true);
   let err = $state<string | null>(null);
   let msg = $state<string | null>(null);
 
@@ -14,15 +16,27 @@
   let modelKey = $state(`${MODELS[0].model_name}|${MODELS[0].pretrained}`);
   let device = $state("auto");
 
-  onMount(async () => {
+  async function load() {
     try {
       settings = await api.getSettings();
       modelKey = `${settings.model_name}|${settings.pretrained}`;
       device = settings.device || "auto";
+      err = null;
     } catch (e) {
       err = (e as Error).message;
+    } finally {
+      connecting = false;
     }
+  }
+
+  // Retry when the sidecar becomes ready (handles the case where this page
+  // mounted before the sidecar had a chance to announce its port).
+  const unsubReady = sidecarReady.subscribe((ready) => {
+    if (ready && !settings) load();
   });
+
+  onMount(load);
+  onDestroy(() => unsubReady());
 
   async function save() {
     if (!settings) return;
@@ -48,7 +62,10 @@
 <section class="max-w-2xl space-y-4 p-4">
   <h1 class="text-base font-semibold">Settings</h1>
 
-  {#if err}
+  {#if connecting && !settings}
+    <p class="text-sm text-neutral-500">Connecting to backend…</p>
+  {/if}
+  {#if err && !connecting}
     <div class="rounded border border-red-900/60 bg-red-950/40 p-2 text-sm text-red-300">{err}</div>
   {/if}
   {#if msg}

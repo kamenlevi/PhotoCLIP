@@ -1,11 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { api, type Folder, type IndexProgress } from "$lib/ipc";
+  import { sidecarReady } from "$lib/sidecar";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
   let folders = $state<Folder[]>([]);
   let progress = $state<Record<string, IndexProgress>>({});
   let err = $state<string | null>(null);
+  let msg = $state<string | null>(null);
+  let connecting = $state(true);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let manualPath = $state("");
 
@@ -14,8 +17,11 @@
       folders = await api.listFolders();
       const all = await api.indexStatus();
       progress = all as Record<string, IndexProgress>;
+      err = null;
     } catch (e) {
       err = (e as Error).message;
+    } finally {
+      connecting = false;
     }
   }
 
@@ -25,10 +31,14 @@
       const picked = await openDialog({ directory: true, multiple: false });
       if (typeof picked === "string") chosen = picked;
     } catch {
-      // dialog plugin not available — fall back to text input.
+      // Dialog plugin not available (e.g. running in a plain browser) —
+      // fall back to the text input.
     }
     if (!chosen) chosen = manualPath.trim() || null;
-    if (!chosen) return;
+    if (!chosen) {
+      err = "Pick a folder via the dialog or paste a path into the text box first.";
+      return;
+    }
     try {
       await api.addFolder(chosen);
       manualPath = "";
@@ -37,6 +47,24 @@
     } catch (e) {
       err = (e as Error).message;
     }
+  }
+
+  async function quickAddCommon() {
+    err = null;
+    msg = null;
+    const candidates = ["~/Pictures", "~/Downloads", "~/Desktop", "~/Documents"];
+    let added = 0;
+    for (const path of candidates) {
+      try {
+        await api.addFolder(path);
+        await api.indexStart(path);
+        added++;
+      } catch { /* not present on this machine, ignore */ }
+    }
+    await refresh();
+    msg = added
+      ? `Added ${added} folder${added === 1 ? "" : "s"} from your home directory.`
+      : "Nothing to add — common folders already tracked or missing.";
   }
 
   async function reindex(path: string) {
@@ -58,42 +86,88 @@
     }
   }
 
+  async function toggleWatch(path: string, current: number) {
+    try {
+      await api.setWatch(path, !current);
+      await refresh();
+    } catch (e) {
+      err = (e as Error).message;
+    }
+  }
+
+  async function prune(path: string) {
+    try {
+      const r = await api.indexPrune(path);
+      await refresh();
+      msg = `Pruned ${r.pruned} dead row${r.pruned === 1 ? "" : "s"}.`;
+    } catch (e) {
+      err = (e as Error).message;
+    }
+  }
+
+  // When the sidecar comes up (possibly after this page already mounted and
+  // showed an error), trigger an immediate refresh.
+  const unsubReady = sidecarReady.subscribe((ready) => {
+    if (ready) refresh();
+  });
+
   onMount(() => {
     refresh();
-    pollTimer = setInterval(refresh, 1000);
+    pollTimer = setInterval(refresh, 2000);
   });
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer);
+    unsubReady();
   });
 
   function pct(p: IndexProgress): number {
     if (!p.total) return 0;
-    return Math.round((100 * (p.indexed + p.skipped + p.failed)) / p.total);
+    return Math.round((100 * (p.indexed + p.moved + p.skipped + p.failed)) / p.total);
   }
 </script>
 
 <section class="space-y-4 p-4">
-  <header class="flex flex-wrap items-center gap-2">
-    <h1 class="text-base font-semibold">Indexed folders</h1>
-    <div class="flex-1"></div>
-    <input
-      type="text"
-      bind:value={manualPath}
-      placeholder="/home/me/Pictures"
-      class="rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm" />
-    <button
-      type="button"
-      on:click={add}
-      class="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">
-      Add folder
-    </button>
+  <header class="space-y-3">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-base font-semibold">Indexed folders</h1>
+      <div class="flex-1"></div>
+      <button
+        type="button"
+        on:click={quickAddCommon}
+        title="Auto-add ~/Pictures, ~/Downloads, ~/Desktop, ~/Documents"
+        class="rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-sm hover:bg-neutral-800">
+        Quick add common folders
+      </button>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <input
+        type="text"
+        bind:value={manualPath}
+        placeholder="/full/path/to/folder  (or paste a path, then Add)"
+        class="min-w-[28rem] flex-1 rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none" />
+      <button
+        type="button"
+        on:click={add}
+        class="rounded bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
+        Add folder
+      </button>
+    </div>
+    <p class="text-xs text-neutral-500">
+      Tip: the picker opens a native dialog; if it doesn't appear, paste a path above.
+    </p>
   </header>
 
+  {#if connecting && !err}
+    <p class="text-sm text-neutral-500">Connecting to backend…</p>
+  {/if}
   {#if err}
     <div class="rounded border border-red-900/60 bg-red-950/40 p-2 text-sm text-red-300">{err}</div>
   {/if}
+  {#if msg}
+    <div class="rounded border border-emerald-900/60 bg-emerald-950/40 p-2 text-sm text-emerald-300">{msg}</div>
+  {/if}
 
-  {#if folders.length === 0}
+  {#if !connecting && folders.length === 0 && !err}
     <p class="text-sm text-neutral-500">No folders yet. Add one to start indexing.</p>
   {/if}
 
@@ -106,8 +180,19 @@
             <div class="truncate font-mono text-sm">{f.path}</div>
             <div class="text-xs text-neutral-500">{f.image_count} indexed images</div>
           </div>
+          <label class="flex items-center gap-1.5 text-xs text-neutral-300">
+            <input
+              type="checkbox"
+              checked={!!f.watch}
+              on:change={() => toggleWatch(f.path, f.watch)}
+              class="h-3.5 w-3.5 accent-indigo-500" />
+            Watch
+          </label>
           <button on:click={() => reindex(f.path)} class="rounded bg-neutral-800 px-2 py-1 text-xs hover:bg-neutral-700">
             Re-index
+          </button>
+          <button on:click={() => prune(f.path)} class="rounded bg-neutral-800 px-2 py-1 text-xs hover:bg-neutral-700">
+            Prune
           </button>
           <button on:click={() => remove(f.path)} class="rounded bg-neutral-800 px-2 py-1 text-xs text-red-300 hover:bg-red-900/30">
             Remove
@@ -119,7 +204,9 @@
               <div class="h-full bg-indigo-500 transition-[width]" style="width: {pct(p)}%"></div>
             </div>
             <div class="mt-1 flex justify-between text-[11px] text-neutral-500">
-              <span>{p.indexed} indexed · {p.skipped} skipped · {p.failed} failed</span>
+              <span>
+                {p.indexed} indexed · {p.moved} moved · {p.skipped} skipped · {p.failed} failed
+              </span>
               <span>{p.seen}/{p.total}</span>
             </div>
             {#if p.current_path}

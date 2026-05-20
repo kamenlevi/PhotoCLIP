@@ -1,6 +1,10 @@
 <script lang="ts">
   import "../app.css";
+  import { onDestroy, onMount } from "svelte";
+  import { goto, invalidateAll } from "$app/navigation";
   import { page } from "$app/stores";
+  import { resetSidecarBase } from "$lib/ipc";
+  import { sidecarReady } from "$lib/sidecar";
 
   const tabs = [
     { href: "/search/", label: "Search" },
@@ -9,6 +13,40 @@
   ];
 
   let { children } = $props();
+  let unlistenSearch: (() => void) | null = null;
+  let unlistenNav: (() => void) | null = null;
+  let unlistenReady: (() => void) | null = null;
+
+  onMount(async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      // Spotlight → main: navigate to /search and run the query.
+      unlistenSearch = await listen("nav:search", (e) => {
+        const q = String(e.payload ?? "");
+        const url = `/search/?q=${encodeURIComponent(q)}`;
+        goto(url);
+      });
+      // Tray menu → switch tabs.
+      unlistenNav = await listen("nav", (e) => {
+        const tab = String(e.payload ?? "");
+        if (tab === "library") goto("/library/");
+        else if (tab === "settings") goto("/settings/");
+        else if (tab === "search") goto("/search/");
+      });
+      // Sidecar announces its port → reset the cached base so the next API
+      // call uses the correct port, then notify all pages to retry.
+      unlistenReady = await listen("sidecar://ready", () => {
+        resetSidecarBase();
+        sidecarReady.set(true);
+        invalidateAll();
+      });
+    } catch { /* dev browser, no tauri */ }
+  });
+  onDestroy(() => {
+    unlistenSearch?.();
+    unlistenNav?.();
+    unlistenReady?.();
+  });
 </script>
 
 <div class="flex h-full flex-col">

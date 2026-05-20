@@ -14,6 +14,10 @@ declare global {
 
 let cachedBase: string | null = null;
 
+export function resetSidecarBase() {
+  cachedBase = null;
+}
+
 export function sidecarBase(): string {
   if (cachedBase) return cachedBase;
   let port: number | undefined;
@@ -23,8 +27,12 @@ export function sidecarBase(): string {
     if (envPort) port = Number(envPort);
   }
   if (!port) port = 8765;
-  cachedBase = `http://127.0.0.1:${port}`;
-  return cachedBase;
+  const base = `http://127.0.0.1:${port}`;
+  // Only cache once we have a confirmed port from the injected window var or env.
+  // Without this guard the fallback (8765) gets locked in before the sidecar
+  // announces its real port, causing all API calls to permanently fail.
+  if (port !== 8765 || !browser) cachedBase = base;
+  return base;
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {

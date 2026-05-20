@@ -5,7 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use once_cell::sync::Lazy;
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder,
+};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 static SIDECAR: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 
@@ -18,17 +24,137 @@ struct AppState {
     port: Arc<Mutex<Option<u16>>>,
 }
 
+// ---------- commands ----------
+
 #[tauri::command]
 fn sidecar_port(state: tauri::State<'_, AppState>) -> Option<u16> {
     *state.port.lock().unwrap()
 }
 
-/// Build the command that launches the Python sidecar.
-///
-/// Resolution order:
-///   1. `PHOTOCLIP_SIDECAR` env var: full command, space-separated.
-///   2. `PHOTOCLIP_PYTHON` env var as interpreter (default `python3`),
-///      running `-m sidecar.server` from the resolved repo root.
+#[tauri::command]
+fn show_main(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+#[tauri::command]
+fn hide_spotlight(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("spotlight") {
+        let _ = win.hide();
+    }
+}
+
+#[tauri::command]
+fn resize_spotlight(app: AppHandle, height: f64) {
+    if let Some(win) = app.get_webview_window("spotlight") {
+        let h = height.clamp(80.0, 720.0);
+        let _ = win.set_size(LogicalSize::new(640.0, h));
+    }
+}
+
+#[tauri::command]
+fn frontmost_folder() -> Option<String> {
+    frontmost_folder_impl()
+}
+
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+
+    Command::new(cmd)
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{cmd} {path}: {e}"))
+}
+
+#[tauri::command]
+fn search_in_main(app: AppHandle, query: String) {
+    show_main_window(&app);
+    let _ = app.emit("nav:search", query);
+}
+
+// ---------- frontmost folder ----------
+
+#[cfg(target_os = "macos")]
+fn frontmost_folder_impl() -> Option<String> {
+    let script = r#"
+        try
+            tell application "Finder"
+                if (count of windows) is 0 then return ""
+                return POSIX path of (target of front window as alias)
+            end tell
+        on error
+            return ""
+        end try
+    "#;
+    let out = Command::new("osascript").args(["-e", script]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+#[cfg(target_os = "linux")]
+fn frontmost_folder_impl() -> Option<String> {
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && std::env::var("XDG_SESSION_TYPE")
+            .map(|s| s == "wayland")
+            .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let pid_out = Command::new("xdotool")
+        .args(["getactivewindow", "getwindowpid"])
+        .output()
+        .ok()?;
+    let pid: u32 = String::from_utf8_lossy(&pid_out.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()?
+        .trim()
+        .to_string();
+
+    const FILE_MANAGERS: &[&str] = &[
+        "nautilus", "nemo", "caja", "dolphin", "thunar", "pcmanfm", "krusader", "files",
+    ];
+    if !FILE_MANAGERS.iter().any(|fm| comm.eq_ignore_ascii_case(fm)) {
+        return None;
+    }
+
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    Some(cwd.to_string_lossy().to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn frontmost_folder_impl() -> Option<String> {
+    None
+}
+
+// ---------- sidecar lifecycle ----------
+
+fn resolve_python() -> String {
+    if let Ok(py) = std::env::var("PHOTOCLIP_PYTHON") {
+        return py;
+    }
+    // Prefer the venv created by the optional postinstall script.
+    let venv = PathBuf::from("/opt/photoclip/venv/bin/python3");
+    if venv.exists() {
+        return venv.to_string_lossy().to_string();
+    }
+    "python3".to_string()
+}
+
 fn build_sidecar_command(app: &AppHandle) -> Command {
     if let Ok(custom) = std::env::var("PHOTOCLIP_SIDECAR") {
         let mut parts = custom.split_whitespace();
@@ -38,16 +164,31 @@ fn build_sidecar_command(app: &AppHandle) -> Command {
         return cmd;
     }
 
-    // Walk up from the resource dir (or cwd) to find a directory containing `sidecar/`.
-    let start: PathBuf = app
-        .path()
-        .resource_dir()
-        .ok()
+    let resource_dir: Option<PathBuf> = app.path().resource_dir().ok();
+
+    // Installed mode: sidecar Python files are bundled in the resource directory.
+    // This path is taken when running from a .deb / .dmg / .msi install.
+    if let Some(ref rd) = resource_dir {
+        if rd.join("sidecar").is_dir() {
+            let python = resolve_python();
+            eprintln!("[photoclip] bundled sidecar at {}/sidecar, python={python}", rd.display());
+            let mut cmd = Command::new(python);
+            cmd.arg("-m").arg("sidecar.server");
+            cmd.current_dir(rd);
+            // Prevent writing __pycache__ into potentially read-only install dirs.
+            cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+            return cmd;
+        }
+    }
+
+    // Dev mode: walk up from resource_dir to find the repo's sidecar directory.
+    // Works when running via `pnpm tauri dev` from the repo checkout.
+    let start = resource_dir
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
     let mut repo_root = start.clone();
-    for _ in 0..6 {
+    for _ in 0..8 {
         if repo_root.join("sidecar").is_dir() {
             break;
         }
@@ -58,7 +199,8 @@ fn build_sidecar_command(app: &AppHandle) -> Command {
         }
     }
 
-    let python = std::env::var("PHOTOCLIP_PYTHON").unwrap_or_else(|_| "python3".into());
+    let python = resolve_python();
+    eprintln!("[photoclip] dev sidecar at {}/sidecar, python={python}", repo_root.display());
     let mut cmd = Command::new(python);
     cmd.arg("-m").arg("sidecar.server");
     cmd.current_dir(repo_root);
@@ -72,7 +214,6 @@ fn spawn_sidecar(app: &AppHandle, port_slot: Arc<Mutex<Option<u16>>>) -> anyhow:
 
     eprintln!("[photoclip] spawning sidecar: {:?}", cmd);
     let mut child = cmd.spawn()?;
-
     let stdout = child.stdout.take().expect("sidecar stdout missing");
     let stderr = child.stderr.take().expect("sidecar stderr missing");
     let app_clone = app.clone();
@@ -86,8 +227,10 @@ fn spawn_sidecar(app: &AppHandle, port_slot: Arc<Mutex<Option<u16>>>) -> anyhow:
                     *port_slot.lock().unwrap() = Some(port);
                     let _ = app_clone.emit("sidecar://ready", SidecarReady { port });
                     let script = format!("window.__PHOTOCLIP_PORT = {port};");
-                    if let Some(win) = app_clone.get_webview_window("main") {
-                        let _ = win.eval(&script);
+                    for label in ["main", "spotlight"] {
+                        if let Some(win) = app_clone.get_webview_window(label) {
+                            let _ = win.eval(&script);
+                        }
                     }
                 }
             }
@@ -113,22 +256,214 @@ fn kill_sidecar() {
     }
 }
 
+// ---------- windows ----------
+
+fn create_spotlight(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    WebviewWindowBuilder::new(app, "spotlight", WebviewUrl::App("spotlight/".into()))
+        .title("PhotoCLIP")
+        .inner_size(640.0, 72.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .build()
+}
+
+fn position_spotlight(win: &WebviewWindow) -> tauri::Result<()> {
+    let monitor = match win.primary_monitor()? {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let scale = monitor.scale_factor();
+    let screen_w = monitor.size().width as f64 / scale;
+    let screen_h = monitor.size().height as f64 / scale;
+
+    let win_size = win.outer_size().unwrap_or_default();
+    let win_w = if win_size.width > 0 {
+        win_size.width as f64 / scale
+    } else {
+        640.0
+    };
+
+    let x = ((screen_w - win_w) / 2.0).max(0.0);
+    let y = (screen_h * 0.22).max(40.0);
+    win.set_position(LogicalPosition::new(x, y))
+}
+
+fn toggle_spotlight(app: &AppHandle) {
+    let win = match app.get_webview_window("spotlight") {
+        Some(w) => w,
+        None => match create_spotlight(app) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[photoclip] failed to create spotlight: {e:?}");
+                return;
+            }
+        },
+    };
+    let visible = win.is_visible().unwrap_or(false);
+    if visible {
+        let _ = win.hide();
+    } else {
+        let _ = win.emit("spotlight://show", ());
+        let _ = position_spotlight(&win);
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+// ---------- tray ----------
+
+fn build_tray(app: &AppHandle) -> anyhow::Result<()> {
+    let show_item = MenuItem::with_id(app, "show", "Open PhotoCLIP", true, None::<&str>)?;
+    let search_item = MenuItem::with_id(
+        app,
+        "search",
+        "Quick search…",
+        true,
+        Some("CmdOrCtrl+Space"),
+    )?;
+    let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let library_item = MenuItem::with_id(app, "library", "Library…", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit PhotoCLIP", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &search_item,
+            &show_item,
+            &sep1,
+            &library_item,
+            &settings_item,
+            &sep2,
+            &quit_item,
+        ],
+    )?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("default window icon not configured"))?;
+
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .icon_as_template(true)
+        .tooltip("PhotoCLIP")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(handle_menu_event)
+        .build(app)?;
+    Ok(())
+}
+
+fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
+    match event.id().as_ref() {
+        "show" => show_main_window(app),
+        "search" => toggle_spotlight(app),
+        "settings" => {
+            show_main_window(app);
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.eval("window.location.hash = '#nav:settings';");
+                let _ = app.emit("nav", "settings");
+            }
+        }
+        "library" => {
+            show_main_window(app);
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.eval("window.location.hash = '#nav:library';");
+                let _ = app.emit("nav", "library");
+            }
+        }
+        "quit" => {
+            kill_sidecar();
+            app.exit(0);
+        }
+        _ => {}
+    }
+}
+
+// ---------- entry point ----------
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let port = Arc::new(Mutex::new(None));
     let port_for_state = Arc::clone(&port);
 
+    #[cfg(target_os = "macos")]
+    let primary_mod = Modifiers::META;
+    #[cfg(not(target_os = "macos"))]
+    let primary_mod = Modifiers::CONTROL;
+    let shortcut = Shortcut::new(Some(primary_mod), Code::Space);
+    let trigger = shortcut.clone();
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, sc, event| {
+                    if event.state() == ShortcutState::Pressed && sc == &trigger {
+                        toggle_spotlight(app);
+                    }
+                })
+                .build(),
+        )
         .manage(AppState { port: port_for_state })
-        .invoke_handler(tauri::generate_handler![sidecar_port])
+        .invoke_handler(tauri::generate_handler![
+            sidecar_port,
+            show_main,
+            hide_spotlight,
+            resize_spotlight,
+            frontmost_folder,
+            open_path,
+            search_in_main
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
             if let Err(e) = spawn_sidecar(&handle, Arc::clone(&port)) {
                 eprintln!("[photoclip] failed to spawn sidecar: {e:?}");
             }
+            if let Err(e) = build_tray(&handle) {
+                eprintln!("[photoclip] failed to build tray: {e:?}");
+            }
+            if let Err(e) = create_spotlight(&handle) {
+                eprintln!("[photoclip] failed to create spotlight: {e:?}");
+            }
+            if let Err(e) = handle.global_shortcut().register(shortcut.clone()) {
+                eprintln!(
+                    "[photoclip] global shortcut registration failed: {e:?} \
+                     (use the tray icon to launch the spotlight)"
+                );
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "spotlight" {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    let _ = window.hide();
+                }
+            }
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")
