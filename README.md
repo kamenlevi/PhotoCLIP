@@ -84,6 +84,48 @@ Now `python -m sidecar.search "anything"` discovers the running server
 via `<data-dir>/server.port` and uses it over HTTP — queries become
 sub-100ms. Add `--no-server` to force in-process search.
 
+## Indexing at scale (CPU vs. GPU)
+
+Indexing is `O(images) × CLIP forward pass`. On CPU that's the bottleneck:
+a 5th-gen Intel laptop manages ~0.3–0.5 images/sec with ViT-B/32, which
+makes serious libraries (>100k images) impractical without a GPU.
+
+| Hardware | ViT-B/32 throughput | 100k photos | 1M photos |
+|---|---|---|---|
+| Old laptop CPU (Broadwell, T450s-class) | ~0.3–0.5 img/s | 2–4 days | 3–6 weeks |
+| Modern laptop CPU (M1/M2, Ryzen 6000+) | ~3–8 img/s | 4–10 hrs | 1.5–4 days |
+| Apple Silicon GPU (M1/M2/M3, MPS) | ~30–80 img/s | 20–60 min | 4–10 hrs |
+| Mid-range NVIDIA (GTX 1070, RTX 3060) | ~150–250 img/s | 7–12 min | 1–2 hrs |
+| High-end NVIDIA (RTX 3090/4090) | ~600–1200 img/s | 1.5–3 min | 15–30 min |
+
+The DB and thumb cache are portable: **index on a fast machine, copy
+`~/.local/share/photoclip/` over, and search runs the same anywhere.**
+Search itself is cheap (one text encode + ~50ms vector scan at 100k), so
+the laptop is fine for queries — just not for the initial bulk index.
+
+Tuning knobs:
+
+```bash
+PHOTOCLIP_BATCH_SIZE=32  python -m sidecar.index ~/Pictures
+PHOTOCLIP_LOAD_WORKERS=8 python -m sidecar.index ~/Pictures
+```
+
+- `PHOTOCLIP_BATCH_SIZE` — images per CLIP pass. Default 16. Raise to
+  32–64 on a GPU, 16–32 on CPU. Bigger isn't always faster on CPU.
+- `PHOTOCLIP_LOAD_WORKERS` — parallel image-decode threads. Default 4.
+  Raise on HEIC/RAW-heavy libraries where decode is slow; lower if
+  memory pressure is a concern.
+
+To benchmark before committing to a long run:
+
+```bash
+python -m sidecar.index ~/Pictures --limit 200
+# Done in 1m23s. Throughput: 2.41 img/s
+```
+
+The output shows live throughput and ETA so you know what you're in for
+before kicking off a multi-hour job.
+
 ## Keeping the index in sync
 
 Two ways:
