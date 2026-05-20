@@ -88,7 +88,7 @@
     overflow: hidden;
     display: flex;
     align-items: center;
-    padding: 0 26px;
+    padding: 0 22px;
     -webkit-font-smoothing: antialiased;
     font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
   }
@@ -98,7 +98,7 @@
     border: none;
     color: inherit;
     outline: none;
-    font-size: 24px;
+    font-size: 21px;
     font-weight: 300;
     letter-spacing: -0.01em;
     min-width: 0;

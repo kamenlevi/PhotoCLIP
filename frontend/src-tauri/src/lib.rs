@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl,
+    AppHandle, Emitter, LogicalPosition, Manager, RunEvent, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -47,13 +47,6 @@ fn hide_spotlight(app: AppHandle) {
     }
 }
 
-#[tauri::command]
-fn resize_spotlight(app: AppHandle, height: f64) {
-    if let Some(win) = app.get_webview_window("spotlight") {
-        let h = height.clamp(80.0, 720.0);
-        let _ = win.set_size(LogicalSize::new(640.0, h));
-    }
-}
 
 #[tauri::command]
 fn frontmost_folder() -> Option<String> {
@@ -257,7 +250,7 @@ fn kill_sidecar() {
 fn create_spotlight(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, "spotlight", WebviewUrl::App("spotlight/".into()))
         .title("PhotoCLIP")
-        .inner_size(640.0, 72.0)
+        .inner_size(680.0, 58.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -282,7 +275,7 @@ fn position_spotlight(win: &WebviewWindow) -> tauri::Result<()> {
     let win_w = if win_size.width > 0 {
         win_size.width as f64 / scale
     } else {
-        640.0
+        680.0
     };
 
     let x = ((screen_w - win_w) / 2.0).max(0.0);
@@ -433,7 +426,6 @@ pub fn run() {
             sidecar_port,
             show_main,
             hide_spotlight,
-            resize_spotlight,
             frontmost_folder,
             open_path,
             search_in_main
