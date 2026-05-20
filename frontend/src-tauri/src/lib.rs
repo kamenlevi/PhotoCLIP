@@ -301,13 +301,14 @@ fn toggle_spotlight(app: &AppHandle) {
         let _ = position_spotlight(&win);
         let _ = win.show();
         let _ = win.set_focus();
-        // Emit after show+focus so the webview is active and can process it.
         let _ = win.emit("spotlight://show", ());
-        // Belt-and-suspenders: directly clear the input and focus it via JS
-        // in case the Svelte event listener missed the emit.
+        // Give the webview time to become active, then clear + focus.
+        // Dispatching an InputEvent syncs Svelte's reactive binding.
         let _ = win.eval(
-            "document.querySelector('.spotlight input')?.focus();\
-             document.querySelector('.spotlight input')&&(document.querySelector('.spotlight input').value='');",
+            "setTimeout(()=>{const i=document.querySelector('.spotlight input');\
+             if(i){i.value='';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();}},50);\
+             setTimeout(()=>{const i=document.querySelector('.spotlight input');\
+             if(i){i.value='';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();}},150);",
         );
     }
 }
