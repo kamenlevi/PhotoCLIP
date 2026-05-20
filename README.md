@@ -81,7 +81,8 @@ sudo apt install -y \
   libwebkit2gtk-4.1-dev \
   libayatana-appindicator3-dev \
   librsvg2-dev \
-  xdotool                # for frontmost-folder detection on X11
+  xdotool        # for frontmost-folder detection on X11
+  zenity         # for the native "Add folder" file picker
 ```
 
 Frontmost-folder detection works on **X11** out of the box. On

@@ -25,10 +25,14 @@
       const picked = await openDialog({ directory: true, multiple: false });
       if (typeof picked === "string") chosen = picked;
     } catch {
-      // dialog plugin not available — fall back to text input.
+      // Dialog plugin not available (e.g. running in a plain browser) —
+      // fall back to the text input.
     }
     if (!chosen) chosen = manualPath.trim() || null;
-    if (!chosen) return;
+    if (!chosen) {
+      err = "Pick a folder via the dialog or paste a path into the text box first.";
+      return;
+    }
     try {
       await api.addFolder(chosen);
       manualPath = "";
@@ -37,6 +41,27 @@
     } catch (e) {
       err = (e as Error).message;
     }
+  }
+
+  async function quickAddCommon() {
+    err = null;
+    msg = null;
+    // The sidecar expands ~ via Path.expanduser(), so we can send these
+    // straight through. add_folder returns 400 if the folder doesn't
+    // exist — we just skip those.
+    const candidates = ["~/Pictures", "~/Downloads", "~/Desktop", "~/Documents"];
+    let added = 0;
+    for (const path of candidates) {
+      try {
+        await api.addFolder(path);
+        await api.indexStart(path);
+        added++;
+      } catch { /* not present on this machine, ignore */ }
+    }
+    await refresh();
+    msg = added
+      ? `Added ${added} folder${added === 1 ? "" : "s"} from your home directory.`
+      : "Nothing to add — common folders already tracked or missing.";
   }
 
   async function reindex(path: string) {
@@ -94,20 +119,35 @@
 </script>
 
 <section class="space-y-4 p-4">
-  <header class="flex flex-wrap items-center gap-2">
-    <h1 class="text-base font-semibold">Indexed folders</h1>
-    <div class="flex-1"></div>
-    <input
-      type="text"
-      bind:value={manualPath}
-      placeholder="/home/me/Pictures"
-      class="rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm" />
-    <button
-      type="button"
-      on:click={add}
-      class="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">
-      Add folder
-    </button>
+  <header class="space-y-3">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-base font-semibold">Indexed folders</h1>
+      <div class="flex-1"></div>
+      <button
+        type="button"
+        on:click={quickAddCommon}
+        title="Auto-add ~/Pictures, ~/Downloads, ~/Desktop, ~/Documents"
+        class="rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-sm hover:bg-neutral-800">
+        Quick add common folders
+      </button>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <input
+        type="text"
+        bind:value={manualPath}
+        placeholder="/full/path/to/folder  (or paste a path, then Add)"
+        class="min-w-[28rem] flex-1 rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none" />
+      <button
+        type="button"
+        on:click={add}
+        class="rounded bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
+        Add folder
+      </button>
+    </div>
+    <p class="text-xs text-neutral-500">
+      Tip: the picker opens a native dialog (needs <code>zenity</code> on Linux);
+      if it doesn't appear, just paste a path above.
+    </p>
   </header>
 
   {#if err}

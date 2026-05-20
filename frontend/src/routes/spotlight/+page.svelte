@@ -2,8 +2,6 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { api, type SearchResult } from "$lib/ipc";
 
-  // Tauri invoke + event APIs are imported dynamically so the SvelteKit
-  // dev build also works in a plain browser.
   type InvokeFn = <T = unknown>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
   type ListenFn = (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
   let invoke: InvokeFn | null = null;
@@ -13,14 +11,17 @@
   let results = $state<SearchResult[]>([]);
   let selected = $state(0);
   let loading = $state(false);
-  let scopeFolder = $state<string | null>(null);
   let inputEl: HTMLInputElement | null = $state(null);
   let unlistenShow: (() => void) | null = null;
-  let unlistenKeydown: (() => void) | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
 
+  // Frontmost folder is detected silently and used to scope results
+  // without cluttering the UI. The user can configure default scope in
+  // tray → Settings.
+  let scopeFolder: string | null = null;
+
   const ROW_PX = 64;
-  const HEADER_PX = 80;
+  const HEADER_PX = 72;
   const MAX_ROWS = 8;
 
   async function resize() {
@@ -39,10 +40,7 @@
   }
 
   async function refreshScope() {
-    if (!invoke) {
-      scopeFolder = null;
-      return;
-    }
+    if (!invoke) { scopeFolder = null; return; }
     try {
       const f = await invoke<string | null>("frontmost_folder");
       scopeFolder = f && f.length > 0 ? f : null;
@@ -61,14 +59,10 @@
     }
     loading = true;
     try {
-      const r = await api.search({
-        query: q,
-        top_k: 30,
-        folder: scopeFolder,
-      });
+      const r = await api.search({ query: q, top_k: 30, folder: scopeFolder });
       results = r.results;
       selected = 0;
-    } catch (e) {
+    } catch {
       results = [];
     } finally {
       loading = false;
@@ -92,10 +86,8 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      close();
-    } else if (e.key === "ArrowDown") {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "ArrowDown") {
       e.preventDefault();
       if (results.length) selected = (selected + 1) % results.length;
     } else if (e.key === "ArrowUp") {
@@ -113,9 +105,7 @@
       invoke = core.invoke as unknown as InvokeFn;
       const ev = await import("@tauri-apps/api/event");
       listen = ev.listen as unknown as ListenFn;
-    } catch {
-      // Running in plain dev browser — tauri APIs unavailable.
-    }
+    } catch { /* dev browser fallback */ }
 
     if (listen) {
       unlistenShow = await listen("spotlight://show", async () => {
@@ -143,7 +133,7 @@
 
 <svelte:window on:keydown={onKeydown} />
 
-<div class="spotlight">
+<div class="spotlight" class:loading>
   <div class="search-row">
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="11" cy="11" r="7" />
@@ -153,19 +143,12 @@
       bind:this={inputEl}
       bind:value={query}
       on:input={onInput}
-      placeholder="Search photos…"
+      placeholder="Search photos"
       spellcheck="false"
       autocomplete="off" />
-    {#if scopeFolder}
-      <span class="scope" title={scopeFolder}>
-        in {scopeFolder.split("/").pop() || scopeFolder}
-      </span>
-    {/if}
-    {#if loading}<span class="dot" aria-label="searching" />{/if}
   </div>
 
   {#if results.length > 0}
-    <div class="divider"></div>
     <ul class="results" role="listbox">
       {#each results.slice(0, MAX_ROWS) as r, i (r.id)}
         <li
@@ -179,7 +162,6 @@
             <div class="name">{r.path.split("/").pop()}</div>
             <div class="path">{r.path}</div>
           </div>
-          <div class="score">{r.score.toFixed(2)}</div>
         </li>
       {/each}
     </ul>
@@ -190,28 +172,42 @@
   .spotlight {
     height: 100%;
     width: 100%;
-    background: rgba(28, 28, 32, 0.92);
-    border-radius: 14px;
+    background: rgba(28, 28, 32, 0.93);
+    border-radius: 16px;
     box-shadow:
       0 30px 80px rgba(0, 0, 0, 0.55),
-      0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+      0 0 0 0.5px rgba(255, 255, 255, 0.10) inset;
     color: #f3f3f3;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    position: relative;
+  }
+  /* Subtle progress hint at the bottom edge — keeps the bar clean. */
+  .spotlight.loading::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 1.5px;
+    background: linear-gradient(90deg, transparent, #818cf8, transparent);
+    animation: shimmer 1.1s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
   }
   .search-row {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
     padding: 20px 22px;
-    height: 80px;
+    height: 72px;
     box-sizing: border-box;
   }
   .icon {
     width: 22px;
     height: 22px;
-    color: rgba(255, 255, 255, 0.55);
+    color: rgba(255, 255, 255, 0.42);
     flex-shrink: 0;
   }
   input {
@@ -224,41 +220,15 @@
     font-weight: 300;
     letter-spacing: -0.01em;
     min-width: 0;
+    caret-color: #818cf8;
   }
-  input::placeholder { color: rgba(255, 255, 255, 0.32); }
-  .scope {
-    font-size: 11px;
-    color: rgba(255, 255, 255, 0.55);
-    background: rgba(255, 255, 255, 0.06);
-    padding: 4px 9px;
-    border-radius: 999px;
-    white-space: nowrap;
-    max-width: 220px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #6366f1;
-    animation: pulse 1s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 0.4; transform: scale(0.9); }
-    50% { opacity: 1; transform: scale(1.1); }
-  }
-  .divider {
-    height: 1px;
-    background: rgba(255, 255, 255, 0.07);
-    margin: 0 14px;
-  }
+  input::placeholder { color: rgba(255, 255, 255, 0.28); }
+
   .results {
     margin: 0;
     padding: 6px;
     list-style: none;
-    max-height: calc(8 * 64px);
-    overflow: hidden;
+    border-top: 0.5px solid rgba(255, 255, 255, 0.06);
   }
   .results li {
     display: flex;
@@ -271,9 +241,7 @@
     cursor: pointer;
     transition: background 80ms ease;
   }
-  .results li.selected {
-    background: rgba(99, 102, 241, 0.32);
-  }
+  .results li.selected { background: rgba(99, 102, 241, 0.30); }
   .results img {
     width: 44px;
     height: 44px;
@@ -292,14 +260,9 @@
   }
   .path {
     font-size: 11px;
-    color: rgba(255, 255, 255, 0.45);
+    color: rgba(255, 255, 255, 0.40);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .score {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 11px;
-    color: rgba(255, 255, 255, 0.4);
   }
 </style>

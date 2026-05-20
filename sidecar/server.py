@@ -325,9 +325,63 @@ def _start_persistent_watchers() -> None:
             print(f"[server] failed to start watcher for {r['path']}: {e}", flush=True)
 
 
+def _auto_discover_and_index() -> None:
+    """First-run convenience: track and start indexing common photo
+    locations under $HOME so the user can search immediately without
+    clicking through a folder picker."""
+    conn = db.connect()
+    n = conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+    if n > 0:
+        return  # User has already added or removed folders themselves.
+
+    home = Path.home()
+    candidates = [home / "Pictures", home / "Downloads", home / "Desktop", home / "Documents"]
+    candidates = [p for p in candidates if p.is_dir()]
+    if not candidates:
+        return
+
+    now = time.time()
+    for path in candidates:
+        conn.execute(
+            "INSERT INTO folders(path, added_at, watch) VALUES(?, ?, 1) "
+            "ON CONFLICT(path) DO NOTHING",
+            (str(path), now),
+        )
+    conn.commit()
+    print(
+        f"[server] first run: auto-tracking {len(candidates)} folder(s): "
+        f"{', '.join(str(p) for p in candidates)}",
+        flush=True,
+    )
+
+    # Kick off background indexing in a single thread, one folder at a
+    # time, so the model load only happens once.
+    def runner() -> None:
+        for path in candidates:
+            try:
+                prog = IndexProgress()
+                _set_progress(str(path), prog)
+                index_folder(
+                    path,
+                    progress=prog,
+                    on_progress=lambda p, key=str(path): _set_progress(key, p),
+                )
+                # Re-enable watcher (folder was inserted with watch=1).
+                row = conn.execute(
+                    "SELECT id FROM folders WHERE path = ?", (str(path),)
+                ).fetchone()
+                if row:
+                    watcher_manager().start(row["id"], path)
+            except Exception as e:
+                print(f"[server] auto-index failed for {path}: {e}", flush=True)
+
+    threading.Thread(target=runner, daemon=True, name="phc-auto-index").start()
+
+
 @app.on_event("startup")
 def _on_startup() -> None:
     _start_persistent_watchers()
+    _auto_discover_and_index()
 
 
 @app.on_event("shutdown")

@@ -8,8 +8,8 @@ use once_cell::sync::Lazy;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, RunEvent, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -230,15 +230,37 @@ fn kill_sidecar() {
 fn create_spotlight(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, "spotlight", WebviewUrl::App("spotlight/".into()))
         .title("PhotoCLIP")
-        .inner_size(640.0, 80.0)
+        .inner_size(640.0, 72.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
-        .center()
         .build()
+}
+
+/// Position the spotlight ~22% from the top of the primary monitor —
+/// roughly where macOS Spotlight sits, well above the screen midline.
+fn position_spotlight(win: &WebviewWindow) -> tauri::Result<()> {
+    let monitor = match win.primary_monitor()? {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let scale = monitor.scale_factor();
+    let screen_w = monitor.size().width as f64 / scale;
+    let screen_h = monitor.size().height as f64 / scale;
+
+    let win_size = win.outer_size().unwrap_or_default();
+    let win_w = if win_size.width > 0 {
+        win_size.width as f64 / scale
+    } else {
+        640.0
+    };
+
+    let x = ((screen_w - win_w) / 2.0).max(0.0);
+    let y = (screen_h * 0.22).max(40.0);
+    win.set_position(LogicalPosition::new(x, y))
 }
 
 fn toggle_spotlight(app: &AppHandle) {
@@ -257,7 +279,7 @@ fn toggle_spotlight(app: &AppHandle) {
         let _ = win.hide();
     } else {
         let _ = win.emit("spotlight://show", ());
-        let _ = win.center();
+        let _ = position_spotlight(&win);
         let _ = win.show();
         let _ = win.set_focus();
     }
